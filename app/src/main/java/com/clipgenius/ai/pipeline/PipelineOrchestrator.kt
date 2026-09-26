@@ -92,16 +92,25 @@ object PipelineOrchestrator {
                 if (audioManifest == null || !audioManifest.isExtractionComplete || audioManifest.chunks.isEmpty()) {
                     updateProgress(projectId, ProjectStage.IMPORTED, "Audio Extraction", 0.10f, "Extracting audio track from video...")
 
-                    audioManifest = AudioExtractor.extractAudio(
-                        videoPath = videoPath,
-                        projectDir = projectDir,
-                        onProgress = { p, status ->
+                    val media = project.sourceMedia ?: SourceMedia(
+                        path = videoPath,
+                        fileName = videoFile.name,
+                        durationMs = 0L,
+                        hasAudio = true
+                    )
+
+                    val manifest = AudioExtractor.extractAndChunkAudio(
+                        context = context,
+                        projectId = projectId,
+                        sourceMedia = media,
+                        onProgress = { p: Float, status: String ->
                             _progress.value = _progress.value.copy(
                                 percentage = 0.10f + (p * 0.15f),
                                 statusText = status
                             )
                         }
                     )
+                    audioManifest = manifest
 
                     project = project.copy(
                         audioManifest = audioManifest,
@@ -109,8 +118,11 @@ object PipelineOrchestrator {
                         updatedAt = System.currentTimeMillis()
                     )
                     repository.saveProject(project)
-                    Log.i(TAG, "Stage 1 complete: Audio extracted with ${audioManifest.chunks.size} chunks.")
+                    Log.i(TAG, "Stage 1 complete: Audio extracted with ${manifest.chunks.size} chunks.")
                 }
+
+                val currentManifest = audioManifest ?: project.audioManifest
+                    ?: throw IllegalStateException("Audio extraction failed to produce manifest.")
 
                 // ---------------------------------------------------------
                 // STAGE 2: Speech-to-Text Transcription
@@ -127,7 +139,7 @@ object PipelineOrchestrator {
                     val chunkSegmentsMap = mutableMapOf<Int, List<TranscriptSegment>>()
                     var usedFallback = false
 
-                    for (chunk in audioManifest.chunks) {
+                    for (chunk in currentManifest.chunks) {
                         // Check if chunk is already transcribed and cached on disk
                         val cached = TranscriptMerger.loadChunkTranscript(context, projectId, chunk.index)
                         if (cached != null && cached.isNotEmpty()) {
@@ -135,13 +147,13 @@ object PipelineOrchestrator {
                             continue
                         }
 
-                        val chunkProgress = 0.28f + (0.30f * (chunk.index.toFloat() / audioManifest.chunks.size.coerceAtLeast(1)))
+                        val chunkProgress = 0.28f + (0.30f * (chunk.index.toFloat() / currentManifest.chunks.size.coerceAtLeast(1)))
                         updateProgress(
                             projectId,
                             ProjectStage.TRANSCRIBING,
                             "Transcription",
                             chunkProgress,
-                            "Transcribing chunk ${chunk.index + 1} of ${audioManifest.chunks.size}..."
+                            "Transcribing chunk ${chunk.index + 1} of ${currentManifest.chunks.size}..."
                         )
 
                         var segments: List<TranscriptSegment>? = null
@@ -170,13 +182,14 @@ object PipelineOrchestrator {
                         TranscriptMerger.saveChunkTranscript(context, projectId, chunk.index, segments)
                     }
 
-                    transcript = TranscriptMerger.mergeChunks(
+                    val mergedTranscript = TranscriptMerger.mergeAndDeduplicate(
                         context = context,
                         projectId = projectId,
-                        chunkSegments = chunkSegmentsMap,
-                        manifest = audioManifest,
-                        isFallback = usedFallback
+                        chunks = currentManifest.chunks,
+                        chunkSegmentsMap = chunkSegmentsMap,
+                        isFallbackGemini = usedFallback
                     )
+                    transcript = mergedTranscript
 
                     project = project.copy(
                         transcript = transcript,
@@ -184,8 +197,11 @@ object PipelineOrchestrator {
                         updatedAt = System.currentTimeMillis()
                     )
                     repository.saveProject(project)
-                    Log.i(TAG, "Stage 2 complete: Transcribed ${transcript.segments.size} segments (total words: ${transcript.totalWords}).")
+                    Log.i(TAG, "Stage 2 complete: Transcribed ${mergedTranscript.segments.size} segments (total words: ${mergedTranscript.totalWords}).")
                 }
+
+                val currentTranscript = transcript ?: project.transcript
+                    ?: throw IllegalStateException("Transcription failed to produce transcript.")
 
                 // ---------------------------------------------------------
                 // STAGE 3: Gemini AI Clip Discovery
@@ -195,7 +211,15 @@ object PipelineOrchestrator {
                     updateProgress(projectId, ProjectStage.DISCOVERING_CLIPS, "AI Clip Discovery", 0.62f, "Analyzing transcript with Gemini AI for viral moments...")
 
                     val aiPlanner = AiClipPlanner(context)
-                    candidates = aiPlanner.analyzeTranscriptForClips(projectId, transcript)
+                    val discoveryResult = aiPlanner.discoverClips(
+                        projectId = projectId,
+                        transcript = currentTranscript,
+                        videoDurationMs = project.sourceMedia?.durationMs ?: 0L,
+                        onProgress = { pStatus ->
+                            _progress.value = _progress.value.copy(statusText = pStatus)
+                        }
+                    )
+                    candidates = discoveryResult.clips
 
                     if (candidates.isEmpty()) {
                         throw IllegalStateException("No viral clip candidates could be extracted from transcript. Please try with another video.")
@@ -218,7 +242,11 @@ object PipelineOrchestrator {
                     updateProgress(projectId, ProjectStage.CLIPS_READY, "Timestamp Verification", 0.85f, "Verifying audio alignment and clip boundaries...")
 
                     val verifier = TimestampVerifier()
-                    verifiedClips = verifier.verifyClipCandidates(candidates, transcript)
+                    verifiedClips = verifier.verifyAll(
+                        candidates = candidates,
+                        transcript = currentTranscript,
+                        videoDurationMs = project.sourceMedia?.durationMs ?: 0L
+                    )
 
                     project = project.copy(
                         verifiedClips = verifiedClips,
