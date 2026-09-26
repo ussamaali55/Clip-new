@@ -6,6 +6,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.clipgenius.ai.state.SourceMedia
+import com.clipgenius.ai.util.CrashLogger
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -80,8 +81,10 @@ object VideoInputHandler {
 
             outputStream.flush()
             onProgress(1.0f)
+            CrashLogger.addBreadcrumb("import ok: copied ${targetFile.length()} bytes to private storage")
             return targetFile
         } catch (e: Exception) {
+            CrashLogger.addBreadcrumb("import failed: ${e.message}")
             // Cleanup partial file on failure or cancellation
             if (targetFile.exists()) {
                 targetFile.delete()

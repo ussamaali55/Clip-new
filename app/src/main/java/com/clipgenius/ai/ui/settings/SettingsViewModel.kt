@@ -3,7 +3,9 @@ package com.clipgenius.ai.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import android.content.Context
 import com.clipgenius.ai.data.SecurePreferences
+import com.clipgenius.ai.util.CrashLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +39,9 @@ class SettingsViewModel(private val securePreferences: SecurePreferences) : View
 
     private val _deepgramTestStatus = MutableStateFlow<KeyTestResult>(KeyTestResult.Idle)
     val deepgramTestStatus: StateFlow<KeyTestResult> = _deepgramTestStatus.asStateFlow()
+
+    private val _errorLogContent = MutableStateFlow("")
+    val errorLogContent: StateFlow<String> = _errorLogContent.asStateFlow()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -148,6 +153,19 @@ class SettingsViewModel(private val securePreferences: SecurePreferences) : View
 
     fun clearConfirmationMessage() {
         _saveConfirmationMessage.value = null
+    }
+
+    fun loadErrorLog(context: Context) {
+        _errorLogContent.value = CrashLogger.getLogContent(context)
+    }
+
+    fun clearErrorLog(context: Context) {
+        CrashLogger.clearLog(context)
+        _errorLogContent.value = CrashLogger.getLogContent(context)
+    }
+
+    fun copyErrorLog(context: Context) {
+        CrashLogger.copyToClipboard(context)
     }
 }
 

@@ -21,6 +21,7 @@ import com.clipgenius.ai.state.TranscriptSegment
 import com.clipgenius.ai.transcription.DeepgramClient
 import com.clipgenius.ai.transcription.GeminiFallbackTranscriber
 import com.clipgenius.ai.transcription.TranscriptMerger
+import com.clipgenius.ai.util.CrashLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -303,6 +304,7 @@ class ProjectViewModel(
 
     // --- PHASE 2 ACTIONS ---
     fun importVideoUri(uri: Uri) {
+        CrashLogger.addBreadcrumb("User started video import: uri=$uri")
         viewModelScope.launch {
             _isImporting.value = true
             _importError.value = null
@@ -352,9 +354,12 @@ class ProjectViewModel(
                     _thumbnailBitmap.value = thumbnail
                     _audioManifest.value = null
                     _transcript.value = null
+
+                    CrashLogger.addBreadcrumb("import ok: file=${copiedFile.name}, size=${copiedFile.length()} bytes, hasAudio=${sourceMedia.hasAudio}")
                 }
-            } catch (e: Exception) {
-                _importError.value = e.localizedMessage
+            } catch (t: Throwable) {
+                CrashLogger.logError(context, "ProjectViewModel", "Import failed: ${t.message}", t)
+                _importError.value = t.localizedMessage
                     ?: "Could not read this video file. It may be corrupt or in an unsupported format."
             } finally {
                 _isImporting.value = false
@@ -411,12 +416,37 @@ class ProjectViewModel(
 
     // --- PHASE 3 AUDIO EXTRACTION & CHUNKING ACTIONS ---
     fun extractAudio() {
+        CrashLogger.addBreadcrumb("User tapped Extract Audio for project $projectId")
         viewModelScope.launch {
-            val currentProject = _project.value ?: return@launch
-            val media = currentProject.sourceMedia ?: return@launch
+            val currentProject = _project.value
+            if (currentProject == null) {
+                _audioError.value = "Project not found. Please re-open the project."
+                return@launch
+            }
+
+            // Resolve or inspect media if sourceMedia is missing but video path exists
+            val media = currentProject.sourceMedia ?: run {
+                val candidatePath = currentProject.sourceVideoPath.ifBlank { currentProject.videoUri }
+                if (candidatePath.isNotBlank()) {
+                    try {
+                        val file = File(candidatePath)
+                        if (file.exists()) {
+                            VideoInputHandler.inspectMediaFile(context, file)
+                        } else null
+                    } catch (t: Throwable) {
+                        null
+                    }
+                } else null
+            }
+
+            if (media == null) {
+                _audioError.value = "No video imported. Please import a video first."
+                return@launch
+            }
 
             if (!media.hasAudio) {
                 _audioError.value = "This video has no audio track, so transcription cannot proceed."
+                CrashLogger.addBreadcrumb("Extract Audio skipped: video has no audio track")
                 return@launch
             }
 
@@ -442,14 +472,27 @@ class ProjectViewModel(
                         put("Transcript", "in_progress")
                     }
                     val updatedProject = currentProject.copy(
+                        sourceMedia = media,
                         audioManifest = manifest,
                         stages = updatedStages
                     )
                     repository.saveProject(updatedProject)
                     _project.value = updatedProject
                 }
-            } catch (e: Exception) {
-                _audioError.value = e.localizedMessage ?: "Audio extraction failed. Your video file is safe. Tap Retry."
+            } catch (t: Throwable) {
+                CrashLogger.logError(context, "ProjectViewModel", "Audio extraction error: ${t.message}", t)
+                _audioError.value = when {
+                    t is IllegalArgumentException && t.message?.contains("no audio track", ignoreCase = true) == true ->
+                        "This video has no audio track, so transcription cannot proceed."
+                    t.message?.contains("no audio track", ignoreCase = true) == true ->
+                        "This video has no audio track, so transcription cannot proceed."
+                    t is SecurityException || t.message?.contains("permission", ignoreCase = true) == true ->
+                        "Storage permission was denied. Please allow video access in app settings."
+                    t.message?.contains("storage space", ignoreCase = true) == true ->
+                        t.localizedMessage ?: "Not enough free storage space."
+                    else ->
+                        t.localizedMessage ?: "Audio extraction failed. Your video file is safe. Tap Retry."
+                }
             } finally {
                 _isExtractingAudio.value = false
                 _extractionProgress.value = 0f
