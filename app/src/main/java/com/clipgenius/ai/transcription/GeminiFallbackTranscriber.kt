@@ -3,10 +3,13 @@ package com.clipgenius.ai.transcription
 import android.content.Context
 import android.util.Log
 import com.clipgenius.ai.BuildConfig
+import com.clipgenius.ai.aiplanner.GeminiConfig
+import com.clipgenius.ai.aiplanner.GeminiModelNotFoundException
 import com.clipgenius.ai.data.SecurePreferences
 import com.clipgenius.ai.state.AudioChunk
 import com.clipgenius.ai.state.TranscriptSegment
 import com.clipgenius.ai.state.TranscriptWord
+import com.clipgenius.ai.util.CrashLogger
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -19,14 +22,13 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
- * Phase 4 Fallback: Direct Gemini Audio Transcription using Gemini File API and gemini-3.5-flash.
+ * Phase 4 Fallback: Direct Gemini Audio Transcription using Gemini File API and GeminiConfig.
  * Used when Deepgram key is absent or quota limit is reached.
  */
 class GeminiFallbackTranscriber(private val context: Context) {
 
     companion object {
         private const val TAG = "GeminiFallback"
-        private const val MODEL_NAME = "gemini-3.5-flash"
     }
 
     private val securePreferences = SecurePreferences(context)
@@ -68,7 +70,7 @@ class GeminiFallbackTranscriber(private val context: Context) {
         val fileUri = uploadChunkToGeminiFiles(chunkFile, apiKey)
         Log.i(TAG, "Uploaded chunk ${chunk.index} to Gemini Files API: $fileUri")
 
-        // 2. Call gemini-3.5-flash generateContent with structured JSON
+        // 2. Call Gemini generateContent with structured JSON and automatic model fallback
         return generateTranscriptionWithGemini(fileUri, apiKey, chunk.startMs)
     }
 
@@ -129,8 +131,6 @@ class GeminiFallbackTranscriber(private val context: Context) {
         apiKey: String,
         chunkStartMs: Long
     ): List<TranscriptSegment> {
-        val generateUrl = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL_NAME:generateContent?key=$apiKey"
-
         val promptText = "Transcribe this audio with word-level timestamps as JSON. " +
                 "Output a JSON object with this exact structure: " +
                 "{\"segments\": [{\"start\": 0.0, \"end\": 2.5, \"speaker\": 1, \"text\": \"hello world\", \"words\": [{\"word\": \"hello\", \"start\": 0.0, \"end\": 0.8, \"speaker\": 1}, {\"word\": \"world\", \"start\": 0.9, \"end\": 2.5, \"speaker\": 1}]}]}"
@@ -165,21 +165,63 @@ class GeminiFallbackTranscriber(private val context: Context) {
             put("generationConfig", genConfig)
         }
 
-        val request = Request.Builder()
-            .url(generateUrl)
-            .header("Content-Type", "application/json")
-            .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
+        val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
+        val candidateModels = GeminiConfig.getCandidateModels(context)
+        var lastException: Exception? = null
 
-        val responseString = httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                val err = response.body?.string() ?: ""
-                throw IOException("Gemini transcription failed (${response.code}): $err")
+        for ((index, model) in candidateModels.withIndex()) {
+            try {
+                CrashLogger.addBreadcrumb("GeminiFallbackTranscriber: attempting transcription with model '$model' (${index + 1}/${candidateModels.size})")
+
+                val generateUrl = GeminiConfig.getEndpointUrl(model, apiKey)
+                val request = Request.Builder()
+                    .url(generateUrl)
+                    .header("Content-Type", "application/json")
+                    .post(requestBody)
+                    .build()
+
+                val responseString = httpClient.newCall(request).execute().use { response ->
+                    val bodyString = response.body?.string() ?: ""
+                    if (!response.isSuccessful) {
+                        val lowerBody = bodyString.lowercase()
+                        val isModelUnavailable = response.code == 404 ||
+                                (response.code == 400 && (lowerBody.contains("not available") || lowerBody.contains("not found") || lowerBody.contains("model")))
+                        if (isModelUnavailable) {
+                            throw GeminiModelNotFoundException(model, response.code, bodyString)
+                        }
+                        throw IOException("Gemini transcription failed (${response.code}): $bodyString")
+                    }
+                    bodyString
+                }
+
+                val segments = parseGeminiResponse(responseString, chunkStartMs)
+                CrashLogger.addBreadcrumb("GeminiFallbackTranscriber: transcription succeeded with model '$model'")
+                return segments
+
+            } catch (e: GeminiModelNotFoundException) {
+                lastException = e
+                val nextModel = candidateModels.getOrNull(index + 1)
+                if (nextModel != null) {
+                    CrashLogger.addBreadcrumb("GeminiFallbackTranscriber: model '$model' unavailable (404). Falling back to '$nextModel'.")
+                    CrashLogger.logError(context, TAG, "Model '$model' 404 not available. Retrying with '$nextModel'", e)
+                } else {
+                    CrashLogger.addBreadcrumb("GeminiFallbackTranscriber: all candidate models exhausted after 404 on '$model'.")
+                    CrashLogger.logError(context, TAG, "All models exhausted for fallback transcription. Final error on '$model'", e)
+                }
+            } catch (e: Exception) {
+                lastException = e
+                val msg = e.message ?: ""
+                val nextModel = candidateModels.getOrNull(index + 1)
+                if (nextModel != null) {
+                    CrashLogger.addBreadcrumb("GeminiFallbackTranscriber: error on model '$model' ($msg). Retrying with fallback '$nextModel'.")
+                    CrashLogger.logError(context, TAG, "Error on model '$model' ($msg), retrying with '$nextModel'", e)
+                } else {
+                    break
+                }
             }
-            response.body?.string() ?: ""
         }
 
-        return parseGeminiResponse(responseString, chunkStartMs)
+        throw lastException ?: IOException("Gemini transcription failed for all configured models.")
     }
 
     fun parseGeminiResponse(jsonString: String, chunkStartMs: Long): List<TranscriptSegment> {

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import android.content.Context
+import com.clipgenius.ai.aiplanner.GeminiConfig
 import com.clipgenius.ai.data.SecurePreferences
 import com.clipgenius.ai.util.CrashLogger
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,9 @@ class SettingsViewModel(private val securePreferences: SecurePreferences) : View
     private val _deepgramKey = MutableStateFlow("")
     val deepgramKey: StateFlow<String> = _deepgramKey.asStateFlow()
 
+    private val _geminiModel = MutableStateFlow(GeminiConfig.DEFAULT_MODEL)
+    val geminiModel: StateFlow<String> = _geminiModel.asStateFlow()
+
     private val _saveConfirmationMessage = MutableStateFlow<String?>(null)
     val saveConfirmationMessage: StateFlow<String?> = _saveConfirmationMessage.asStateFlow()
 
@@ -56,6 +60,8 @@ class SettingsViewModel(private val securePreferences: SecurePreferences) : View
         // SECURITY RULE: Never print keys to Logcat, never include them in error messages or toasts, and never export/share them.
         _geminiKey.value = securePreferences.getGeminiApiKey()
         _deepgramKey.value = securePreferences.getDeepgramApiKey()
+        val savedModel = securePreferences.getGeminiModelOverride().trim()
+        _geminiModel.value = if (savedModel.isNotEmpty()) savedModel else GeminiConfig.DEFAULT_MODEL
     }
 
     fun updateGeminiKey(key: String) {
@@ -70,19 +76,36 @@ class SettingsViewModel(private val securePreferences: SecurePreferences) : View
         _saveConfirmationMessage.value = null
     }
 
+    fun updateGeminiModel(model: String) {
+        _geminiModel.value = model
+        _saveConfirmationMessage.value = null
+    }
+
+    fun resetGeminiModel() {
+        _geminiModel.value = GeminiConfig.DEFAULT_MODEL
+        _saveConfirmationMessage.value = null
+    }
+
     fun saveKeys() {
         securePreferences.saveGeminiApiKey(_geminiKey.value)
         securePreferences.saveDeepgramApiKey(_deepgramKey.value)
-        _saveConfirmationMessage.value = "API Keys saved securely in EncryptedSharedPreferences!"
+        val modelInput = _geminiModel.value.trim()
+        if (modelInput == GeminiConfig.DEFAULT_MODEL) {
+            securePreferences.saveGeminiModelOverride("")
+        } else {
+            securePreferences.saveGeminiModelOverride(modelInput)
+        }
+        _saveConfirmationMessage.value = "Settings saved securely!"
     }
 
     fun deleteKeys() {
         securePreferences.clearApiKeys()
         _geminiKey.value = ""
         _deepgramKey.value = ""
+        _geminiModel.value = GeminiConfig.DEFAULT_MODEL
         _geminiTestStatus.value = KeyTestResult.Idle
         _deepgramTestStatus.value = KeyTestResult.Idle
-        _saveConfirmationMessage.value = "All stored API Keys have been deleted."
+        _saveConfirmationMessage.value = "All stored settings have been cleared."
     }
 
     fun testGeminiKey() {

@@ -2,6 +2,7 @@ package com.clipgenius.ai.aiplanner
 
 import android.content.Context
 import com.clipgenius.ai.data.SecurePreferences
+import com.clipgenius.ai.util.CrashLogger
 import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,20 +17,11 @@ import java.util.concurrent.TimeUnit
  * Phase 6 Gemini REST Client using OkHttp.
  * - Reads API key ONLY from EncryptedSharedPreferences (via SecurePreferences).
  * - NEVER logs the API key under any circumstance.
- * - Uses configurable GEMINI_MODEL constant.
+ * - Uses centralized GeminiConfig with automatic fallback across models.
  * - Handles 429/5xx with exponential backoff (2s, 4s, 8s, max 4 tries).
  * - Translates HTTP 400 invalid-key and quota errors to clear user messages.
  */
 class GeminiClient(private val context: Context) {
-
-    companion object {
-        /**
-         * Configurable Gemini model name constant so it can be changed in one place.
-         */
-        const val GEMINI_MODEL = "gemini-2.5-flash"
-
-        private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-    }
 
     private val securePreferences = SecurePreferences(context)
 
@@ -48,26 +40,61 @@ class GeminiClient(private val context: Context) {
 
     /**
      * Calls Gemini generateContent with the system prompt and transcript content.
-     * Retries once if response JSON parsing fails.
+     * Automatically attempts fallback models (e.g. gemini-3.8-flash -> gemini-3.5-flash)
+     * if HTTP 404 (model not available) is returned.
      */
     suspend fun generateContentWithRetry(
         systemInstruction: String,
         promptText: String
     ): String {
-        var parseAttempt = 0
-        while (parseAttempt < 2) {
-            parseAttempt++
-            val rawResponse = callGenerateContent(systemInstruction, promptText)
-            val extractedJson = extractJsonText(rawResponse)
-            if (isValidJsonStructure(extractedJson)) {
-                return extractedJson
-            }
-            if (parseAttempt < 2) {
-                // Wait briefly before retrying the call once
-                delay(1000L)
+        val candidateModels = GeminiConfig.getCandidateModels(context)
+        var lastException: Exception? = null
+
+        for ((index, model) in candidateModels.withIndex()) {
+            try {
+                CrashLogger.addBreadcrumb("Gemini API: attempting generateContent with model '$model' (${index + 1}/${candidateModels.size})")
+
+                var parseAttempt = 0
+                while (parseAttempt < 2) {
+                    parseAttempt++
+                    val rawResponse = callGenerateContent(model, systemInstruction, promptText)
+                    val extractedJson = extractJsonText(rawResponse)
+                    if (isValidJsonStructure(extractedJson)) {
+                        CrashLogger.addBreadcrumb("Gemini API: generateContent succeeded with model '$model'")
+                        return extractedJson
+                    }
+                    if (parseAttempt < 2) {
+                        delay(1000L)
+                    }
+                }
+                throw IOException("Gemini model '$model' returned an unusable answer.")
+            } catch (e: GeminiModelNotFoundException) {
+                lastException = e
+                val nextModel = candidateModels.getOrNull(index + 1)
+                if (nextModel != null) {
+                    CrashLogger.addBreadcrumb("Gemini API: model '$model' unavailable (404). Silently falling back to '$nextModel'.")
+                    CrashLogger.logError(context, "GeminiClient", "Model '$model' 404 not available. Retrying with '$nextModel'", e)
+                } else {
+                    CrashLogger.addBreadcrumb("Gemini API: all models exhausted after 404 on '$model'.")
+                    CrashLogger.logError(context, "GeminiClient", "All Gemini models exhausted. Final error on '$model'", e)
+                }
+                // Continue to the next fallback model
+            } catch (e: Exception) {
+                lastException = e
+                val msg = e.message ?: ""
+                if (msg.contains("Gemini rejected the API key") || msg.contains("Gemini API key not found")) {
+                    CrashLogger.logError(context, "GeminiClient", "API key error: $msg", e)
+                    throw e
+                }
+                val nextModel = candidateModels.getOrNull(index + 1)
+                if (nextModel != null) {
+                    CrashLogger.addBreadcrumb("Gemini API: model '$model' failed ($msg). Retrying with fallback '$nextModel'.")
+                    CrashLogger.logError(context, "GeminiClient", "Model '$model' failed ($msg), retrying with '$nextModel'", e)
+                }
             }
         }
-        throw IOException("Gemini returned an unusable answer. Tap Retry.")
+
+        throw lastException ?: IOException("Gemini API call failed for all configured models. Tap Retry.")
     }
 
     /**
@@ -75,6 +102,7 @@ class GeminiClient(private val context: Context) {
      * NEVER logs the API key.
      */
     private suspend fun callGenerateContent(
+        model: String,
         systemInstruction: String,
         promptText: String
     ): String {
@@ -114,8 +142,8 @@ class GeminiClient(private val context: Context) {
 
         val requestBody = requestPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
 
-        // Build URL without logging it
-        val endpointUrl = "$BASE_URL/$GEMINI_MODEL:generateContent?key=$apiKey"
+        // Build URL using centralized GeminiConfig
+        val endpointUrl = GeminiConfig.getEndpointUrl(model, apiKey)
 
         val request = Request.Builder()
             .url(endpointUrl)
@@ -137,6 +165,15 @@ class GeminiClient(private val context: Context) {
                 }
 
                 val lowerBody = responseBodyString.lowercase()
+
+                // Check for 404 (model retired/not available) or explicit model-not-found message
+                val isModelUnavailable = responseCode == 404 ||
+                        (responseCode == 400 && (lowerBody.contains("not available") || lowerBody.contains("not found") || lowerBody.contains("model")))
+
+                if (isModelUnavailable) {
+                    val errorMsg = extractErrorMessage(responseBodyString)
+                    throw GeminiModelNotFoundException(model, responseCode, errorMsg)
+                }
 
                 // Check for 400 Invalid API Key
                 if (responseCode == 400) {
@@ -183,6 +220,9 @@ class GeminiClient(private val context: Context) {
                 // Any other non-successful response
                 throw IOException("Gemini API call failed ($responseCode): ${extractErrorMessage(responseBodyString)}")
 
+            } catch (e: GeminiModelNotFoundException) {
+                // Rethrow immediately so caller can switch to fallback model
+                throw e
             } catch (e: IOException) {
                 // If it's already one of our user-friendly translated errors, rethrow immediately
                 val msg = e.message ?: ""

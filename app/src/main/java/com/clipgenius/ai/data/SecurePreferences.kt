@@ -47,12 +47,22 @@ class SecurePreferences(context: Context) {
         sharedPreferences.edit()
             .remove(KEY_GEMINI_API)
             .remove(KEY_DEEPGRAM_API)
+            .remove(KEY_GEMINI_MODEL)
             .apply()
+    }
+
+    fun saveGeminiModelOverride(model: String) {
+        sharedPreferences.edit().putString(KEY_GEMINI_MODEL, model.trim()).apply()
+    }
+
+    fun getGeminiModelOverride(): String {
+        return sharedPreferences.getString(KEY_GEMINI_MODEL, "") ?: ""
     }
 
     companion object {
         private const val PREFS_FILENAME = "clipgenius_secure_prefs"
         private const val KEY_GEMINI_API = "encrypted_gemini_api_key"
         private const val KEY_DEEPGRAM_API = "encrypted_deepgram_api_key"
+        private const val KEY_GEMINI_MODEL = "gemini_model_override"
     }
 }

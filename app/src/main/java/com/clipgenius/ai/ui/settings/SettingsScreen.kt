@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.clipgenius.ai.aiplanner.GeminiConfig
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +79,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val geminiKey by viewModel.geminiKey.collectAsStateWithLifecycle()
     val deepgramKey by viewModel.deepgramKey.collectAsStateWithLifecycle()
+    val geminiModel by viewModel.geminiModel.collectAsStateWithLifecycle()
     val saveConfirmationMessage by viewModel.saveConfirmationMessage.collectAsStateWithLifecycle()
     val geminiTestStatus by viewModel.geminiTestStatus.collectAsStateWithLifecycle()
     val deepgramTestStatus by viewModel.deepgramTestStatus.collectAsStateWithLifecycle()
@@ -376,6 +379,89 @@ fun SettingsScreen(
                     }
                 }
                 else -> {}
+            }
+
+            Spacer(modifier = Modifier.height(28.dp))
+
+            // Advanced Gemini Model Section
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("advanced_settings_card")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Advanced: Gemini Model",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Customize the Gemini model name used for AI clip discovery and fallback transcription. Pre-filled with the default model.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = geminiModel,
+                        onValueChange = { viewModel.updateGeminiModel(it) },
+                        singleLine = true,
+                        label = { Text("Gemini model name") },
+                        placeholder = { Text(GeminiConfig.DEFAULT_MODEL) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        trailingIcon = {
+                            if (geminiModel != GeminiConfig.DEFAULT_MODEL) {
+                                TextButton(
+                                    onClick = { viewModel.resetGeminiModel() },
+                                    modifier = Modifier.testTag("reset_gemini_model_button")
+                                ) {
+                                    Text("Reset")
+                                }
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = MaterialTheme.colorScheme.surface,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("gemini_model_name_input")
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Default: ${GeminiConfig.DEFAULT_MODEL} • Fallback: ${GeminiConfig.FALLBACK_MODEL}\nIf the primary model ever 404s, Clip Genius AI automatically retries using the fallback model.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(28.dp))
